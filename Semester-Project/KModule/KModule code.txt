@@ -1,0 +1,105 @@
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/proc_fs.h>
+#include <linux/uaccess.h>
+#include <linux/sched/signal.h>
+
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Real PCB Reader for mini_shell");
+MODULE_AUTHOR("Sharaiz Romee");
+
+static struct proc_dir_entry *entry;
+static pid_t target_pid = -1;
+
+// Buffer where PCB info will be printed
+static char pcb_buffer[2048];
+static int pcb_len = 0;
+
+// Write handler — user writes PID here
+static ssize_t pcb_write(struct file *file, const char __user *buffer, size_t count, loff_t *ppos)
+{
+    char kbuf[32];
+    if (count > sizeof(kbuf) - 1)
+        return -EINVAL;
+
+    if (copy_from_user(kbuf, buffer, count))
+        return -EFAULT;
+
+    kbuf[count] = '\0';
+    kstrtoint(kbuf, 10, &target_pid);
+
+    return count;
+}
+
+// Read handler — kernel prints actual PCB fields
+static ssize_t pcb_read(struct file *file, char __user *buffer, size_t count, loff_t *ppos)
+{
+    struct task_struct *task;
+
+    if (*ppos > 0 || target_pid < 0)
+        return 0;
+
+    // Look up the task_struct (PCB)
+    task = pid_task(find_vpid(target_pid), PIDTYPE_PID);
+    if (!task) {
+        pcb_len = snprintf(pcb_buffer, sizeof(pcb_buffer),
+                           "PID %d not found\n", target_pid);
+    } else {
+        pcb_len = snprintf(pcb_buffer, sizeof(pcb_buffer),
+            "=== REAL PCB (Kernel-Level) ===\n"
+            "PID: %d\n"
+            "State: %ld\n"
+            "Priority: %d\n"
+            "Static Priority: %d\n"
+            "Normal Priority: %d\n"
+            "vruntime: %llu\n"
+            "Policy: %u\n"
+            "On CPU: %d\n"
+            "Context Switches Voluntary: %lu\n"
+            "Context Switches Involuntary: %lu\n",
+            task->pid,
+            task->state,
+            task->prio,
+            task->static_prio,
+            task->normal_prio,
+            task->se.vruntime,
+            task->policy,
+            task->on_cpu,
+            task->nvcsw,
+            task->nivcsw
+        );
+    }
+
+    if (copy_to_user(buffer, pcb_buffer, pcb_len))
+        return -EFAULT;
+
+    *ppos = pcb_len;
+    return pcb_len;
+}
+
+static struct proc_ops pcb_ops = {
+    .proc_write = pcb_write,
+    .proc_read  = pcb_read
+};
+
+static int __init pcb_init(void)
+{
+    entry = proc_create("realpcb", 0666, NULL, &pcb_ops);
+    if (!entry) {
+        printk(KERN_ERR "realpcb: failed to create /proc entry\n");
+        return -ENOMEM;
+    }
+
+    printk(KERN_INFO "realpcb module loaded\n");
+    return 0;
+}
+
+static void __exit pcb_exit(void)
+{
+    proc_remove(entry);
+    printk(KERN_INFO "realpcb module unloaded\n");
+}
+
+module_init(pcb_init);
+module_exit(pcb_exit);
